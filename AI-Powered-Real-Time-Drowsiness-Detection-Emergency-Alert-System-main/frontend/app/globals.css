@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+:root {
+  /* Dark Futuristic Theme - VigilDrive */
+  --background: #0f1419;
+  --foreground: #e8ecf1;
+  --primary: #ff6b35;
+  --primary-dark: #e85a24;
+  --secondary: #00d4ff;
+  --secondary-dark: #00b8d4;
+  --accent: #7c3aed;
+  --accent-dark: #6d28d9;
+  --neutral-900: #0f1419;
+  --neutral-800: #1a2332;
+  --neutral-700: #2d3748;
+  --neutral-600: #4a5568;
+  --neutral-500: #718096;
+  --neutral-400: #a0aec0;
+  --neutral-300: #cbd5e0;
+  --neutral-200: #e2e8f0;
+  --neutral-100: #f7fafc;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --success: #10b981;
+  --info: #3b82f6;
+  --border: #2d3748;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  @apply border-neutral-700;
+}
+
+body {
+  @apply bg-background text-foreground;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--neutral-800);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--neutral-600);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neutral-500);
+}

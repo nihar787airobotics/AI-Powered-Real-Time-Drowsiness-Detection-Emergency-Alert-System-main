@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-inter: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+    --font-mono: 'Menlo', 'Monaco', 'Courier New', monospace;
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html {
+    background: #0a0a0a;
+    color: #e0e0e0;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-inter);
+    background: #0a0a0a;
+    color: #e0e0e0;
+    overflow-x: hidden;
+  }
+
+  /* Remove scrollbar for webkit */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 240, 255, 0.3);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 240, 255, 0.6);
+  }
+}
+
+@layer components {
+  .glass-panel {
+    background-color: rgba(15, 15, 15, 0.4);
+    border-color: rgba(0, 245, 255, 0.1);
+    @apply rounded-xl border backdrop-blur-lg;
+  }
+
+  .glow-border-cyan {
+    border-color: rgba(0, 240, 255, 0.2);
+    @apply border;
+    box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
+  }
+
+  .glow-border-blue {
+    border-color: rgba(0, 102, 255, 0.2);
+    @apply border;
+    box-shadow: 0 0 20px rgba(0, 102, 255, 0.3);
+  }
+
+  .glow-border-purple {
+    border-color: rgba(139, 92, 246, 0.2);
+    @apply border;
+    box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+  }
+
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(to right, #00f0ff, #0066ff);
+  }
+
+  .text-dim {
+    @apply text-gray-400;
+  }
+
+  .text-muted {
+    @apply text-gray-500;
+  }
+
+  .glow-animation {
+    animation: glow-pulse 3s ease-in-out infinite;
+  }
+}
+
+/* Animations */
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(0, 240, 255, 0.6);
+  }
+}
+
+@keyframes scan-lines {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes floating-particle {
+  0%, 100% {
+    transform: translateY(0) translateX(0);
+    opacity: 0;
+  }
+  10% {
+    opacity: 0.3;
+  }
+  90% {
+    opacity: 0.3;
+  }
+  100% {
+    transform: translateY(-100px) translateX(20px);
+    opacity: 0;
+  }
+}
+
+/* Utility animations */
+.animate-scan-lines {
+  animation: scan-lines 3s linear infinite;
+}
+
+.animate-floating-particle {
+  animation: floating-particle 6s ease-in infinite;
+}
+
+/* Smooth transitions */
+* {
+  transition-property: background-color, border-color, color, box-shadow;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 300ms;
+}
+
+/* Performance optimization - disable transitions during scroll */
+.smooth-scroll {
+  scroll-behavior: smooth;
+}
