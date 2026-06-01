@@ -3,12 +3,12 @@ VigilDrive FastAPI Backend
 Real-time driver monitoring and drowsiness detection system
 """
 
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import json
 import asyncio
@@ -84,7 +84,7 @@ class TelemetryData(BaseModel):
 class AlertData(BaseModel):
     driver_id: str
     alert_type: str  # "drowsiness", "emergency", "speeding"
-    severity: str  # "low", "medium", "high", "critical"
+    severity: str    # "low", "medium", "high", "critical"
     message: str
     timestamp: datetime
     location: Optional[Dict[str, float]] = None
@@ -110,6 +110,22 @@ alerts_data: List[Dict[str, Any]] = []
 active_connections: List[WebSocket] = []
 drivers_data: Dict[str, Dict[str, Any]] = {}
 
+# ============= Helper: JSON-safe datetime serialization =============
+
+def to_json_safe(obj: Any) -> Any:
+    """Recursively convert datetime objects to ISO strings for JSON serialization."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_json_safe(i) for i in obj]
+    return obj
+
+def utcnow() -> datetime:
+    """Return current UTC time as timezone-aware datetime."""
+    return datetime.now(timezone.utc)
+
 # ============= Auth Utilities =============
 
 def hash_password(password: str) -> str:
@@ -120,9 +136,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -138,10 +154,12 @@ def verify_token(token: str) -> dict:
             detail="Invalid authentication credentials"
         )
 
-def get_current_user(token: str = Depends(lambda: None)):
-    """Get current user from token"""
-    if not token:
+# FIX: Use Authorization header properly instead of broken Depends(lambda: None)
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
+    """Get current user from Bearer token in Authorization header"""
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1]
     return verify_token(token)
 
 # ============= Authentication Endpoints =============
@@ -151,30 +169,37 @@ async def register(user_data: UserRegister):
     """Register a new user"""
     if user_data.email in users_db:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     user_id = secrets.token_hex(8)
     hashed_password = hash_password(user_data.password)
-    
+
     user = {
         "id": user_id,
         "email": user_data.email,
         "name": user_data.name,
         "organization": user_data.organization,
         "password": hashed_password,
-        "created_at": datetime.utcnow()
+        "created_at": utcnow()
     }
-    
+
     users_db[user_data.email] = user
-    
+
     access_token = create_access_token(
         data={"sub": user_id, "email": user_data.email},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    
+
+    # FIX: Build UserResponse without leaking 'password' field
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
-        user=UserResponse(**user)
+        user=UserResponse(
+            id=user["id"],
+            email=user["email"],
+            name=user["name"],
+            organization=user["organization"],
+            created_at=user["created_at"]
+        )
     )
 
 @app.post("/api/auth/login", response_model=TokenResponse)
@@ -183,19 +208,26 @@ async def login(user_data: UserLogin):
     user = users_db.get(user_data.email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
     if user["password"] != hash_password(user_data.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
     access_token = create_access_token(
         data={"sub": user["id"], "email": user_data.email},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    
+
+    # FIX: Build UserResponse without leaking 'password' field
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
-        user=UserResponse(**user)
+        user=UserResponse(
+            id=user["id"],
+            email=user["email"],
+            name=user["name"],
+            organization=user["organization"],
+            created_at=user["created_at"]
+        )
     )
 
 # ============= Telemetry Endpoints =============
@@ -205,17 +237,17 @@ async def receive_telemetry(data: TelemetryData):
     """Receive telemetry data from monitoring system"""
     telemetry_entry = {
         "id": secrets.token_hex(8),
-        **data.model_dump(),
-        "received_at": datetime.utcnow()
+        **to_json_safe(data.model_dump()),  # FIX: convert datetimes before storing
+        "received_at": utcnow().isoformat()
     }
     telemetry_data.append(telemetry_entry)
-    
-    # Broadcast to connected clients
+
+    # Broadcast to connected clients — already JSON-safe
     await broadcast_to_clients({
         "type": "telemetry",
         "data": telemetry_entry
     })
-    
+
     # If alert triggered, also log alert
     if data.alert_triggered:
         alert_entry = {
@@ -224,18 +256,18 @@ async def receive_telemetry(data: TelemetryData):
             "alert_type": "drowsiness",
             "severity": "high" if data.drowsiness_score > 0.8 else "medium",
             "message": f"Drowsiness detected - Score: {data.drowsiness_score:.2f}",
-            "timestamp": data.timestamp,
+            "timestamp": data.timestamp.isoformat(),
             "location": data.location,
-            "created_at": datetime.utcnow()
+            "created_at": utcnow().isoformat()
         }
         alerts_data.append(alert_entry)
-        
+
         # Broadcast alert
         await broadcast_to_clients({
             "type": "alert",
             "data": alert_entry
         })
-    
+
     return {"status": "received", "id": telemetry_entry["id"]}
 
 @app.get("/api/telemetry/driver/{driver_id}")
@@ -247,8 +279,21 @@ async def get_driver_telemetry(driver_id: str, limit: int = 100):
 @app.get("/api/telemetry/live")
 async def get_live_telemetry():
     """Get latest telemetry data (last 5 minutes)"""
-    cutoff_time = datetime.utcnow() - timedelta(minutes=5)
-    return [t for t in telemetry_data if t["timestamp"] > cutoff_time]
+    # FIX: compare ISO string timestamps correctly after normalization
+    cutoff_time = utcnow() - timedelta(minutes=5)
+    cutoff_str = cutoff_time.isoformat()
+    result = []
+    for t in telemetry_data:
+        ts = t.get("timestamp", "")
+        # Stored as ISO string after fix; compare lexicographically (works for UTC ISO)
+        if isinstance(ts, str) and ts >= cutoff_str[:19]:
+            result.append(t)
+        elif isinstance(ts, datetime):
+            # Fallback: handle if datetime slipped through
+            ts_aware = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+            if ts_aware >= cutoff_time:
+                result.append(t)
+    return result
 
 # ============= Alerts Endpoints =============
 
@@ -265,17 +310,17 @@ async def create_alert(alert: AlertData):
     """Create a new alert"""
     alert_entry = {
         "id": secrets.token_hex(8),
-        **alert.model_dump(),
-        "created_at": datetime.utcnow()
+        **to_json_safe(alert.model_dump()),  # FIX: convert datetimes
+        "created_at": utcnow().isoformat()
     }
     alerts_data.append(alert_entry)
-    
+
     # Broadcast alert to all connected clients
     await broadcast_to_clients({
         "type": "alert",
         "data": alert_entry
     })
-    
+
     return alert_entry
 
 # ============= Driver Endpoints =============
@@ -306,7 +351,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow(),
+        "timestamp": utcnow().isoformat(),
         "telemetry_count": len(telemetry_data),
         "alerts_count": len(alerts_data),
         "active_connections": len(active_connections)
@@ -319,98 +364,201 @@ async def websocket_monitoring(websocket: WebSocket):
     """WebSocket endpoint for real-time monitoring"""
     await websocket.accept()
     active_connections.append(websocket)
-    
+
     try:
         # Send initial connection message
         await websocket.send_json({
             "type": "connection",
             "message": "Connected to monitoring server",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utcnow().isoformat()
         })
-        
+
         # Keep connection alive
         while True:
-            # Receive message from client
             data = await websocket.receive_text()
-            
-            # Process heartbeat
+
             if data == "ping":
                 await websocket.send_json({
                     "type": "pong",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": utcnow().isoformat()
                 })
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
     except Exception as e:
         print(f"WebSocket error: {e}")
         if websocket in active_connections:
             active_connections.remove(websocket)
 
 async def broadcast_to_clients(message: Dict[str, Any]):
-    """Broadcast message to all connected WebSocket clients"""
+    """Broadcast message to all connected WebSocket clients on /ws/monitoring"""
     disconnected = []
+    payload = {
+        **to_json_safe(message),  # FIX: ensure no datetime objects sneak in
+        "timestamp": utcnow().isoformat()
+    }
     for connection in active_connections:
         try:
-            await connection.send_json({
-                **message,
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            await connection.send_json(payload)
         except Exception as e:
             print(f"Error sending to client: {e}")
             disconnected.append(connection)
-    
-    # Remove disconnected clients
+
     for conn in disconnected:
         if conn in active_connections:
             active_connections.remove(conn)
 
-# ============= WebSocket Endpoint =============
+# ============= WebSocket Endpoint (/ws) =============
+
+# FIX: Separate connection pool for /ws clients (was sharing state with /ws/monitoring)
+ws_connections: Dict[str, Dict[str, Any]] = {}
+
+async def broadcast_message(message: Dict[str, Any]):
+    """
+    FIX: This function was called in /ws endpoint but was never defined — caused
+    NameError at runtime. Now properly broadcasts to all /ws clients.
+    """
+    payload = to_json_safe(message)
+    payload["timestamp"] = utcnow().isoformat()
+    disconnected = []
+    for client_id, conn_info in ws_connections.items():
+        try:
+            await conn_info["websocket"].send_json(payload)
+        except Exception as e:
+            print(f"Error broadcasting to ws client {client_id}: {e}")
+            disconnected.append(client_id)
+    for client_id in disconnected:
+        ws_connections.pop(client_id, None)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time telemetry streaming"""
     client_id = secrets.token_urlsafe(16)
     driver_id = None
-    
+
     try:
         await websocket.accept()
-        print(f"[v0] WebSocket client {client_id} connected")
-        
+        ws_connections[client_id] = {"websocket": websocket, "driver_id": None}
+        print(f"[ws] Client {client_id} connected")
+
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
-            
+
             if message.get("type") == "authenticate":
                 driver_id = message.get("driver_id")
-                print(f"[v0] Client {client_id} authenticated for driver {driver_id}")
+                ws_connections[client_id]["driver_id"] = driver_id
+                print(f"[ws] Client {client_id} authenticated for driver {driver_id}")
                 await websocket.send_json({
                     "type": "authenticated",
                     "client_id": client_id,
                     "driver_id": driver_id
                 })
-            
+
             elif message.get("type") == "subscribe":
                 await websocket.send_json({
                     "type": "subscription_confirmed",
                     "event_type": message.get("event_type")
                 })
-            
+
             elif message.get("type") == "telemetry":
-                # Receive telemetry from Python backend
+                # FIX: broadcast_message is now properly defined above
                 await broadcast_message({
                     "type": "telemetry_update",
                     "driver_id": driver_id,
                     **message
                 })
-    
+
+            elif message.get("type") == "ping":
+                await websocket.send_json({
+                    "type": "pong",
+                    "timestamp": utcnow().isoformat()
+                })
+
     except WebSocketDisconnect:
-        print(f"[v0] WebSocket client {client_id} disconnected")
+        print(f"[ws] Client {client_id} disconnected")
     except Exception as e:
-        print(f"[v0] WebSocket error for client {client_id}: {e}")
+        print(f"[ws] Error for client {client_id}: {e}")
         try:
-            await websocket.close(code=status.WS_1011_SERVER_ERROR)
-        except:
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        except Exception:
             pass
+    finally:
+        ws_connections.pop(client_id, None)
+
+
+# ============= Auth Alias: /api/auth/signup → /api/auth/register =============
+# FIX: Frontend calls /api/auth/signup but backend only had /api/auth/register
+
+@app.post("/api/auth/signup", response_model=TokenResponse)
+async def signup(user_data: UserRegister):
+    """Alias for /api/auth/register — frontend uses /signup"""
+    return await register(user_data)
+
+
+# ============= Stats Endpoint (missing — frontend dashboard calls this) =============
+
+@app.get("/api/stats")
+async def get_stats():
+    """Dashboard summary stats"""
+    cutoff = utcnow() - timedelta(hours=24)
+    cutoff_str = cutoff.isoformat()
+
+    alerts_today = [
+        a for a in alerts_data
+        if isinstance(a.get("timestamp"), str) and a["timestamp"] >= cutoff_str[:19]
+    ]
+
+    drowsiness_scores = [
+        t.get("drowsiness_score", 0)
+        for t in telemetry_data
+        if isinstance(t.get("timestamp"), str) and t["timestamp"] >= cutoff_str[:19]
+    ]
+    avg_drowsiness = (
+        round(sum(drowsiness_scores) / len(drowsiness_scores) * 100, 1)
+        if drowsiness_scores else 0
+    )
+
+    active_driver_ids = set(
+        t["driver_id"] for t in telemetry_data
+        if isinstance(t.get("timestamp"), str) and t["timestamp"] >= cutoff_str[:19]
+    )
+
+    return {
+        "activeDrivers": len(active_driver_ids),
+        "alertsToday": len(alerts_today),
+        "avgDrowsiness": avg_drowsiness,
+        "vehiclesOnline": len(active_driver_ids),
+    }
+
+
+# ============= Monitoring Endpoint (missing — frontend live page calls this) =============
+
+@app.get("/api/monitoring")
+async def get_monitoring():
+    """Active monitoring sessions — returns latest telemetry per driver"""
+    # Group latest telemetry by driver
+    latest: Dict[str, Dict[str, Any]] = {}
+    for entry in telemetry_data:
+        did = entry.get("driver_id", "")
+        if did not in latest or entry["timestamp"] > latest[did]["timestamp"]:
+            latest[did] = entry
+
+    monitors = []
+    for driver_id, t in latest.items():
+        driver = drivers_data.get(driver_id, {})
+        monitors.append({
+            "id": driver_id,
+            "driver_name": driver.get("name", f"Driver {driver_id[:6]}"),
+            "vehicle_id": driver.get("vehicle_id", "Unknown"),
+            "drowsiness_level": round(t.get("drowsiness_score", 0) * 100, 1),
+            "eye_closure": round(t.get("eye_closure_duration", 0) * 100, 1),
+            "speed": t.get("vehicle_speed") or 0,
+            "duration": 0,
+            "status": "active",
+        })
+
+    return {"monitors": monitors}
 
 # ============= Root Endpoint =============
 

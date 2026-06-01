@@ -39,15 +39,28 @@ export default function SignupPage() {
       const response = await axios.post('http://localhost:8000/api/auth/signup', {
         email: formData.email,
         password: formData.password,
-        full_name: formData.fullName,
-        company_name: formData.companyName,
+        // FIX: backend UserRegister model uses 'name' and 'organization', not 'full_name'/'company_name'
+        name: formData.fullName,
+        organization: formData.companyName,
       });
 
       const { access_token } = response.data;
       localStorage.setItem('token', access_token);
       router.push('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Signup failed');
+      // FIX: Pydantic 422 errors return detail as an array of objects, not a string.
+      // Safely extract a readable message regardless of shape.
+      const detail = err.response?.data?.detail;
+      if (Array.isArray(detail)) {
+        // Pydantic validation error — pick the first message
+        setError(detail.map((d: any) => d.msg || JSON.stringify(d)).join(', '));
+      } else if (typeof detail === 'string') {
+        setError(detail);
+      } else if (typeof detail === 'object' && detail !== null) {
+        setError(JSON.stringify(detail));
+      } else {
+        setError('Signup failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
