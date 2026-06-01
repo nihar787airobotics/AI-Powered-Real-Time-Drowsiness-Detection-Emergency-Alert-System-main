@@ -1,0 +1,57 @@
+# ── Secrets — NEVER commit these ──────────────────────────────
+.env
+.env.local
+.env.production
+.env.*
+!.env.example
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ── Database ──────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+vigildrive.db
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+server.log
+logs/
+
+# ── Screenshots (driver footage) ──────────────────────────────
+screenshots/
+*.jpg
+*.jpeg
+*.png
+!assets/*.png
+!assets/*.jpg
+!README*.png
+
+# ── Node / Next.js ───────────────────────────────────────────
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
