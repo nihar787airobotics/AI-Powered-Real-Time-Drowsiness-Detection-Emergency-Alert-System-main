@@ -14,3 +14,7 @@ Timestamp,Fatigue Score,Driver State,EAR,MAR,Yaw,Pitch,Distracted,Yawning,Drowsy
 2026-06-01 18:00:13,0,NORMAL,0.307,0.064,17.63,-35.0,False,False,False
 2026-06-01 18:00:18,0,NORMAL,0.317,0.051,8.15,-35.0,False,False,False
 2026-06-01 18:00:23,0,NORMAL,0.271,0.055,10.79,-35.0,False,False,False
+2026-06-02 00:58:40,0,NORMAL,0.228,1.721,19.01,-35.0,False,True,False
+2026-06-02 00:58:45,92,DANGER,0.243,0.051,-11.05,-35.0,False,False,False
+2026-06-02 00:58:53,0,NORMAL,0.28,0.052,-6.6,-25.67,False,False,False
+2026-06-02 00:58:58,0,NORMAL,0.272,0.054,5.01,-25.67,False,False,False
