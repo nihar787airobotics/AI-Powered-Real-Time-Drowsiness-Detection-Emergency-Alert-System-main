@@ -9,6 +9,7 @@ Handles:
 """
 
 import sqlite3
+import os
 from datetime import datetime
 
 
@@ -16,8 +17,16 @@ class DatabaseManager:
 
     def __init__(self):
 
-        # Database file
-        self.db_path = "analytics/vigildrive.db"
+        # FIX: Use absolute path based on this file's location
+        # so it works regardless of where you run main.py from.
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        analytics_dir = os.path.join(base_dir)
+
+        # Ensure the analytics directory exists
+        os.makedirs(analytics_dir, exist_ok=True)
+
+        # Database file — always resolves to vigildrive-ai/analytics/vigildrive.db
+        self.db_path = os.path.join(analytics_dir, "vigildrive.db")
 
         # Create DB + tables
         self.initialize_database()
@@ -28,10 +37,7 @@ class DatabaseManager:
 
     def initialize_database(self):
 
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -126,27 +132,15 @@ class DatabaseManager:
 
         conn.close()
 
-        print(
-
-            "[INFO] Database initialized successfully."
-        )
+        print("[INFO] Database initialized successfully.")
 
     # ─────────────────────────────────────────────────────────
     # Save Session
     # ─────────────────────────────────────────────────────────
 
-    def save_session(
+    def save_session(self, session_data):
 
-        self,
-
-        session_data
-
-    ):
-
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -171,15 +165,9 @@ class DatabaseManager:
 
         """, (
 
-            datetime.now().strftime(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
-                "%Y-%m-%d %H:%M:%S"
-            ),
-
-            datetime.now().strftime(
-
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
             session_data["session_duration"],
 
@@ -207,27 +195,16 @@ class DatabaseManager:
     # ─────────────────────────────────────────────────────────
 
     def save_event(
-
         self,
-
         event_type,
-
         fatigue_score,
-
         attention_state,
-
         gaze_direction,
-
         driver_status,
-
         screenshot_path=""
-
     ):
 
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -249,10 +226,7 @@ class DatabaseManager:
 
         """, (
 
-            datetime.now().strftime(
-
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
             event_type,
 
@@ -275,20 +249,9 @@ class DatabaseManager:
     # Save Analytics Snapshot
     # ─────────────────────────────────────────────────────────
 
-    def save_analytics(
+    def save_analytics(self, session_data, fatigue_score):
 
-        self,
-
-        session_data,
-
-        fatigue_score
-
-    ):
-
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -310,10 +273,7 @@ class DatabaseManager:
 
         """, (
 
-            datetime.now().strftime(
-
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
             session_data["average_attention"],
 
@@ -336,18 +296,9 @@ class DatabaseManager:
     # Fetch Recent Sessions
     # ─────────────────────────────────────────────────────────
 
-    def get_recent_sessions(
+    def get_recent_sessions(self, limit=10):
 
-        self,
-
-        limit=10
-
-    ):
-
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -373,18 +324,9 @@ class DatabaseManager:
     # Fetch Recent Events
     # ─────────────────────────────────────────────────────────
 
-    def get_recent_events(
+    def get_recent_events(self, limit=20):
 
-        self,
-
-        limit=20
-
-    ):
-
-        conn = sqlite3.connect(
-
-            self.db_path
-        )
+        conn = sqlite3.connect(self.db_path)
 
         cursor = conn.cursor()
 
@@ -405,4 +347,3 @@ class DatabaseManager:
         conn.close()
 
         return data
-    ''' this is the database manager class that handles all interactions with the SQLite database, including initialization, saving sessions/events/analytics, and fetching recent sessions/events. It abstracts away the database logic from the rest of the application, providing a clean interface for data storage and retrieval. '''

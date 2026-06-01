@@ -1,504 +1,908 @@
 """
-VigilDrive FastAPI Backend
-Real-time driver monitoring and drowsiness detection system
+VigilDrive AI - Main Entry Point
+Advanced Real-Time Driver Monitoring System
 """
 
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, status, Header
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, EmailStr
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta, timezone
+import cv2
+import time
+import threading
 import os
-import json
-import asyncio
-from dotenv import load_dotenv
-import jwt
-import hashlib
-import secrets
 
-# Load environment variables
-load_dotenv()
+from datetime import datetime
 
-# Constants
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+# ─────────────────────────────────────────────────────────────
+# Core AI Modules
+# ─────────────────────────────────────────────────────────────
 
-# FastAPI app setup
-app = FastAPI(
-    title="VigilDrive API",
-    description="AI-powered driver monitoring system",
-    version="1.0.0"
+from core.eye_detection import EyeDetector
+from core.yawn_detection import YawnDetector
+from core.head_pose import HeadPoseEstimator
+from core.gaze_tracking import GazeTracker
+from core.attention_monitor import AttentionMonitor
+from core.fatigue_score import FatigueScorer
+from core.calibration import DriverCalibration
+
+# ─────────────────────────────────────────────────────────────
+# Systems
+# ─────────────────────────────────────────────────────────────
+
+from alerts.alerts import AlertSystem
+
+from analytics.logger import EventLogger
+from analytics.session_analyzer import SessionAnalyzer
+from analytics.database import DatabaseManager
+
+from ui.utils import (
+    FPSCounter,
+    draw_overlay,
+    draw_status_panel
 )
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# Trusted host middleware
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "*.vercel.app"]
-)
+def main():
 
-# ============= Pydantic Models =============
+    print("=" * 70)
+    print("      VigilDrive AI - Driver Monitoring System")
+    print("=" * 70)
 
-class UserRegister(BaseModel):
-    email: str
-    password: str
-    name: str
-    organization: Optional[str] = None
+    # ─────────────────────────────────────────────────────────
+    # Create Directories
+    # ─────────────────────────────────────────────────────────
 
-class UserLogin(BaseModel):
-    email: str
-    password: str
+    os.makedirs("screenshots", exist_ok=True)
 
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    name: str
-    organization: Optional[str] = None
-    created_at: datetime
+    os.makedirs("logs", exist_ok=True)
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    user: UserResponse
+    # ─────────────────────────────────────────────────────────
+    # Webcam Initialization
+    # ─────────────────────────────────────────────────────────
 
-class TelemetryData(BaseModel):
-    driver_id: str
-    drowsiness_score: float
-    eye_closure_duration: float
-    head_position: Dict[str, float]
-    timestamp: datetime
-    alert_triggered: bool
-    location: Optional[Dict[str, float]] = None
-    vehicle_speed: Optional[float] = None
+    cap = cv2.VideoCapture(0)
 
-class AlertData(BaseModel):
-    driver_id: str
-    alert_type: str  # "drowsiness", "emergency", "speeding"
-    severity: str    # "low", "medium", "high", "critical"
-    message: str
-    timestamp: datetime
-    location: Optional[Dict[str, float]] = None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 
-class DriverProfile(BaseModel):
-    id: str
-    name: str
-    email: str
-    license_number: str
-    phone: str
-    vehicle_id: str
-    status: str  # "active", "inactive", "on_leave"
-    total_hours_driven: float
-    total_alerts: int
-    last_alert: Optional[datetime] = None
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-# ============= In-Memory Storage (Replace with DB) =============
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
-users_db: Dict[str, Dict[str, Any]] = {}
-tokens_db: Dict[str, str] = {}
-telemetry_data: List[Dict[str, Any]] = []
-alerts_data: List[Dict[str, Any]] = []
-active_connections: List[WebSocket] = []
-drivers_data: Dict[str, Dict[str, Any]] = {}
+    if not cap.isOpened():
 
-# ============= Helper: JSON-safe datetime serialization =============
+        print("[ERROR] Could not access webcam.")
 
-def to_json_safe(obj: Any) -> Any:
-    """Recursively convert datetime objects to ISO strings for JSON serialization."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, dict):
-        return {k: to_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [to_json_safe(i) for i in obj]
-    return obj
+        return
 
-def utcnow() -> datetime:
-    """Return current UTC time as timezone-aware datetime."""
-    return datetime.now(timezone.utc)
+    print("[INFO] Webcam initialized successfully.")
 
-# ============= Auth Utilities =============
+    # ─────────────────────────────────────────────────────────
+    # Initialize AI Modules
+    # ─────────────────────────────────────────────────────────
 
-def hash_password(password: str) -> str:
-    """Hash password using SHA256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    eye_detector = EyeDetector()
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create JWT access token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = utcnow() + expires_delta
-    else:
-        expire = utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    yawn_detector = YawnDetector()
 
-def verify_token(token: str) -> dict:
-    """Verify JWT token"""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials"
+    head_estimator = HeadPoseEstimator()
+
+    gaze_tracker = GazeTracker()
+
+    attention_monitor = AttentionMonitor()
+
+    fatigue_scorer = FatigueScorer()
+
+    calibration = DriverCalibration()
+
+    alert_system = AlertSystem()
+
+    event_logger = EventLogger()
+
+    session_analyzer = SessionAnalyzer()
+
+    database = DatabaseManager()
+
+    fps_counter = FPSCounter()
+
+    # Start calibration
+    calibration.start()
+
+    print("[INFO] All AI modules loaded successfully.")
+
+    print("[INFO] Starting VigilDrive AI...\n")
+
+    # ─────────────────────────────────────────────────────────
+    # Runtime Variables
+    # ─────────────────────────────────────────────────────────
+
+    last_alert_time = 0
+
+    last_log_time = 0
+
+    last_db_save = 0
+
+    ALERT_COOLDOWN = 10
+
+    LOG_COOLDOWN = 5
+
+    DB_SAVE_INTERVAL = 10
+
+    # ─────────────────────────────────────────────────────────
+    # Main Loop
+    # ─────────────────────────────────────────────────────────
+
+    while True:
+
+        success, frame = cap.read()
+
+        if not success:
+
+            print("[WARNING] Failed to capture frame.")
+
+            continue
+
+        # Mirror webcam
+        frame = cv2.flip(frame, 1)
+
+        # RGB conversion
+        rgb_frame = cv2.cvtColor(
+
+            frame,
+
+            cv2.COLOR_BGR2RGB
         )
 
-# FIX: Use Authorization header properly instead of broken Depends(lambda: None)
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-    """Get current user from Bearer token in Authorization header"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = authorization.split(" ", 1)[1]
-    return verify_token(token)
+        # FPS
+        fps = fps_counter.update()
 
-# ============= Authentication Endpoints =============
+        # ─────────────────────────────────────────────────────
+        # Personalized Attention Zone
+        # ─────────────────────────────────────────────────────
 
-@app.post("/api/auth/register", response_model=TokenResponse)
-async def register(user_data: UserRegister):
-    """Register a new user"""
-    if user_data.email in users_db:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        attention_zone = None
 
-    user_id = secrets.token_hex(8)
-    hashed_password = hash_password(user_data.password)
+        if calibration.calibrated:
 
-    user = {
-        "id": user_id,
-        "email": user_data.email,
-        "name": user_data.name,
-        "organization": user_data.organization,
-        "password": hashed_password,
-        "created_at": utcnow()
-    }
+            attention_zone = (
 
-    users_db[user_data.email] = user
+                calibration.get_attention_zone()
+            )
 
-    access_token = create_access_token(
-        data={"sub": user_id, "email": user_data.email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
+        # ─────────────────────────────────────────────────────
+        # AI Detection Pipeline
+        # ─────────────────────────────────────────────────────
 
-    # FIX: Build UserResponse without leaking 'password' field
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse(
-            id=user["id"],
-            email=user["email"],
-            name=user["name"],
-            organization=user["organization"],
-            created_at=user["created_at"]
+        eye_data = eye_detector.process(
+
+            rgb_frame
         )
-    )
 
-@app.post("/api/auth/login", response_model=TokenResponse)
-async def login(user_data: UserLogin):
-    """Login user"""
-    user = users_db.get(user_data.email)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        yawn_data = yawn_detector.process(
 
-    if user["password"] != hash_password(user_data.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    access_token = create_access_token(
-        data={"sub": user["id"], "email": user_data.email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-
-    # FIX: Build UserResponse without leaking 'password' field
-    return TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse(
-            id=user["id"],
-            email=user["email"],
-            name=user["name"],
-            organization=user["organization"],
-            created_at=user["created_at"]
+            rgb_frame
         )
+
+        head_data = head_estimator.process(
+
+            rgb_frame,
+
+            frame,
+
+            attention_zone
+        )
+
+        gaze_data = gaze_tracker.process(
+
+            rgb_frame
+        )
+
+        attention_data = attention_monitor.process(
+
+            gaze_data,
+
+            head_data
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Calibration
+        # ─────────────────────────────────────────────────────
+
+        if not calibration.calibrated:
+
+            calibration.update(
+
+                eye_data,
+
+                yawn_data,
+
+                head_data
+            )
+
+        else:
+
+            thresholds = (
+
+                calibration.get_thresholds()
+            )
+
+            eye_detector.set_threshold(
+
+                thresholds["ear_threshold"]
+            )
+
+            yawn_detector.set_threshold(
+
+                thresholds["mar_threshold"]
+            )
+
+        # ─────────────────────────────────────────────────────
+        # Fatigue Analysis
+        # ─────────────────────────────────────────────────────
+
+        fatigue_data = fatigue_scorer.process(
+
+            eye_data,
+
+            yawn_data,
+
+            head_data
+        )
+
+        fatigue_score = fatigue_data[
+            "fatigue_score"
+        ]
+
+        driver_status = fatigue_data[
+            "status"
+        ]
+
+        # ─────────────────────────────────────────────────────
+        # Session Analytics
+        # ─────────────────────────────────────────────────────
+
+        session_data = session_analyzer.process(
+
+            eye_data,
+
+            yawn_data,
+
+            attention_data,
+
+            fatigue_data
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Database Analytics Snapshot
+        # ─────────────────────────────────────────────────────
+
+        current_time = time.time()
+
+        if (
+
+            current_time - last_db_save
+
+        ) > DB_SAVE_INTERVAL:
+
+            last_db_save = current_time
+
+            database.save_analytics(
+
+                session_data,
+
+                fatigue_score
+            )
+
+        # ─────────────────────────────────────────────────────
+        # Base Rendering
+        # ─────────────────────────────────────────────────────
+
+        draw_overlay(
+
+            frame,
+
+            eye_data,
+
+            yawn_data,
+
+            head_data
+        )
+
+        draw_status_panel(
+
+            frame,
+
+            fps=fps,
+
+            fatigue_score=fatigue_score,
+
+            driver_state=driver_status,
+
+            sleep_prob=fatigue_score,
+
+            eye_data=eye_data,
+
+            yawn_data=yawn_data,
+
+            head_data=head_data
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Attention HUD
+        # ─────────────────────────────────────────────────────
+
+        attention_state = attention_data[
+            "attention_state"
+        ]
+
+        distraction_duration = attention_data[
+            "distraction_duration"
+        ]
+
+        if attention_state == "ATTENTIVE":
+
+            attention_color = (0, 255, 0)
+
+        elif attention_state == "DISTRACTED":
+
+            attention_color = (0, 255, 255)
+
+        else:
+
+            attention_color = (0, 0, 255)
+
+        overlay = frame.copy()
+
+        cv2.rectangle(
+
+            overlay,
+
+            (380, 10),
+
+            (630, 120),
+
+            (30, 30, 30),
+
+            -1
+        )
+
+        cv2.addWeighted(
+
+            overlay,
+
+            0.55,
+
+            frame,
+
+            0.45,
+
+            0,
+
+            frame
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"ATTENTION: {attention_state}",
+
+            (395, 40),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.65,
+
+            attention_color,
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"GAZE: {gaze_data['gaze_direction']}",
+
+            (395, 70),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"TIME: {distraction_duration:.1f}s",
+
+            (395, 100),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (200, 200, 200),
+
+            2
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Session Analytics HUD
+        # ─────────────────────────────────────────────────────
+
+        analytics_overlay = frame.copy()
+
+        cv2.rectangle(
+
+            analytics_overlay,
+
+            (10, 250),
+
+            (320, 420),
+
+            (25, 25, 25),
+
+            -1
+        )
+
+        cv2.addWeighted(
+
+            analytics_overlay,
+
+            0.55,
+
+            frame,
+
+            0.45,
+
+            0,
+
+            frame
+        )
+
+        cv2.putText(
+
+            frame,
+
+            "SESSION ANALYTICS",
+
+            (20, 280),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.7,
+
+            (0, 255, 255),
+
+            2
+        )
+
+        minutes = session_data[
+            "session_duration"
+        ] // 60
+
+        seconds = session_data[
+            "session_duration"
+        ] % 60
+
+        cv2.putText(
+
+            frame,
+
+            f"TIME: {minutes:02}:{seconds:02}",
+
+            (20, 315),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"BLINKS: {session_data['total_blinks']}",
+
+            (20, 345),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"YAWNS: {session_data['total_yawns']}",
+
+            (20, 375),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"DISTRACTIONS: {session_data['total_distractions']}",
+
+            (20, 405),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        # Risk
+        risk = session_data["driver_risk"]
+
+        if risk == "LOW":
+
+            risk_color = (0, 255, 0)
+
+        elif risk == "MEDIUM":
+
+            risk_color = (0, 255, 255)
+
+        else:
+
+            risk_color = (0, 0, 255)
+
+        cv2.putText(
+
+            frame,
+
+            f"RISK: {risk}",
+
+            (180, 345),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.7,
+
+            risk_color,
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"ATTN: {session_data['average_attention']:.0f}%",
+
+            (180, 380),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        cv2.putText(
+
+            frame,
+
+            f"FATIGUE: {session_data['average_fatigue']:.0f}",
+
+            (180, 410),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            (255, 255, 255),
+
+            2
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Calibration UI
+        # ─────────────────────────────────────────────────────
+
+        if not calibration.calibrated:
+
+            remaining = (
+
+                calibration.remaining_time()
+            )
+
+            cv2.putText(
+
+                frame,
+
+                f"CALIBRATING... LOOK FORWARD ({remaining}s)",
+
+                (20, 440),
+
+                cv2.FONT_HERSHEY_SIMPLEX,
+
+                0.7,
+
+                (0, 255, 255),
+
+                2
+            )
+
+        else:
+
+            cv2.putText(
+
+                frame,
+
+                "PERSONALIZED AI ACTIVE",
+
+                (20, 440),
+
+                cv2.FONT_HERSHEY_SIMPLEX,
+
+                0.7,
+
+                (0, 255, 0),
+
+                2
+            )
+
+        # ─────────────────────────────────────────────────────
+        # Event Logging
+        # ─────────────────────────────────────────────────────
+
+        important_event = (
+
+            fatigue_score > 40
+
+            or
+
+            head_data["distracted"]
+
+            or
+
+            attention_data["distracted"]
+
+            or
+
+            yawn_data["yawning"]
+
+            or
+
+            eye_data["drowsy"]
+        )
+
+        if important_event:
+
+            if (
+
+                current_time - last_log_time
+
+            ) > LOG_COOLDOWN:
+
+                last_log_time = current_time
+
+                event_logger.log(
+
+                    fatigue_score,
+
+                    driver_status,
+
+                    eye_data,
+
+                    yawn_data,
+
+                    head_data
+                )
+
+        # ─────────────────────────────────────────────────────
+        # Alert System
+        # ─────────────────────────────────────────────────────
+
+        if (
+
+            driver_status == "DANGER"
+
+            or
+
+            attention_state == "CRITICAL_DISTRACTION"
+        ):
+
+            if (
+
+                current_time - last_alert_time
+
+            ) > ALERT_COOLDOWN:
+
+                last_alert_time = current_time
+
+                timestamp = datetime.now().strftime(
+
+                    "%Y%m%d_%H%M%S"
+                )
+
+                screenshot_path = (
+
+                    f"screenshots/danger_{timestamp}.jpg"
+                )
+
+                cv2.imwrite(
+
+                    screenshot_path,
+
+                    frame
+                )
+
+                database.save_event(
+
+                    event_type="CRITICAL_ALERT",
+
+                    fatigue_score=fatigue_score,
+
+                    attention_state=attention_state,
+
+                    gaze_direction=gaze_data["gaze_direction"],
+
+                    driver_status=driver_status,
+
+                    screenshot_path=screenshot_path
+                )
+
+                print(
+
+                    f"[ALERT] Screenshot saved: {screenshot_path}"
+                )
+
+                alert_thread = threading.Thread(
+
+                    target=alert_system.trigger_emergency,
+
+                    args=(
+
+                        frame.copy(),
+
+                        fatigue_score,
+
+                        fatigue_score
+                    ),
+
+                    daemon=True
+                )
+
+                alert_thread.start()
+
+        elif (
+
+            driver_status == "DROWSY"
+
+            or
+
+            attention_state == "DISTRACTED"
+        ):
+
+            alert_system.play_warning_beep()
+
+            database.save_event(
+
+                event_type="WARNING",
+
+                fatigue_score=fatigue_score,
+
+                attention_state=attention_state,
+
+                gaze_direction=gaze_data["gaze_direction"],
+
+                driver_status=driver_status
+            )
+
+        # ─────────────────────────────────────────────────────
+        # Display Window
+        # ─────────────────────────────────────────────────────
+
+        cv2.imshow(
+
+            "VigilDrive AI - Driver Monitoring",
+
+            frame
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Keyboard Controls
+        # ─────────────────────────────────────────────────────
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
+
+            print("\n[INFO] Closing VigilDrive AI...")
+
+            break
+
+        elif key == ord("s"):
+
+            timestamp = datetime.now().strftime(
+
+                "%Y%m%d_%H%M%S"
+            )
+
+            screenshot_path = (
+
+                f"screenshots/manual_{timestamp}.jpg"
+            )
+
+            cv2.imwrite(
+
+                screenshot_path,
+
+                frame
+            )
+
+            print(
+
+                f"[INFO] Screenshot saved: {screenshot_path}"
+            )
+
+        elif key == ord("r"):
+
+            fatigue_scorer = FatigueScorer()
+
+            calibration.start()
+
+            print(
+
+                "[INFO] Personalized calibration restarted."
+            )
+
+    # ─────────────────────────────────────────────────────────
+    # Save Final Session
+    # ─────────────────────────────────────────────────────────
+
+    database.save_session(
+
+        session_data
     )
 
-# ============= Telemetry Endpoints =============
+    # ─────────────────────────────────────────────────────────
+    # Cleanup
+    # ─────────────────────────────────────────────────────────
 
-@app.post("/api/telemetry")
-async def receive_telemetry(data: TelemetryData):
-    """Receive telemetry data from monitoring system"""
-    telemetry_entry = {
-        "id": secrets.token_hex(8),
-        **to_json_safe(data.model_dump()),  # FIX: convert datetimes before storing
-        "received_at": utcnow().isoformat()
-    }
-    telemetry_data.append(telemetry_entry)
+    cap.release()
 
-    # Broadcast to connected clients — already JSON-safe
-    await broadcast_to_clients({
-        "type": "telemetry",
-        "data": telemetry_entry
-    })
+    cv2.destroyAllWindows()
 
-    # If alert triggered, also log alert
-    if data.alert_triggered:
-        alert_entry = {
-            "id": secrets.token_hex(8),
-            "driver_id": data.driver_id,
-            "alert_type": "drowsiness",
-            "severity": "high" if data.drowsiness_score > 0.8 else "medium",
-            "message": f"Drowsiness detected - Score: {data.drowsiness_score:.2f}",
-            "timestamp": data.timestamp.isoformat(),
-            "location": data.location,
-            "created_at": utcnow().isoformat()
-        }
-        alerts_data.append(alert_entry)
+    alert_system.cleanup()
 
-        # Broadcast alert
-        await broadcast_to_clients({
-            "type": "alert",
-            "data": alert_entry
-        })
+    print(
 
-    return {"status": "received", "id": telemetry_entry["id"]}
+        "[INFO] VigilDrive AI stopped successfully."
+    )
 
-@app.get("/api/telemetry/driver/{driver_id}")
-async def get_driver_telemetry(driver_id: str, limit: int = 100):
-    """Get recent telemetry for a specific driver"""
-    driver_telemetry = [t for t in telemetry_data if t["driver_id"] == driver_id]
-    return sorted(driver_telemetry, key=lambda x: x["timestamp"], reverse=True)[:limit]
 
-@app.get("/api/telemetry/live")
-async def get_live_telemetry():
-    """Get latest telemetry data (last 5 minutes)"""
-    # FIX: compare ISO string timestamps correctly after normalization
-    cutoff_time = utcnow() - timedelta(minutes=5)
-    cutoff_str = cutoff_time.isoformat()
-    result = []
-    for t in telemetry_data:
-        ts = t.get("timestamp", "")
-        # Stored as ISO string after fix; compare lexicographically (works for UTC ISO)
-        if isinstance(ts, str) and ts >= cutoff_str[:19]:
-            result.append(t)
-        elif isinstance(ts, datetime):
-            # Fallback: handle if datetime slipped through
-            ts_aware = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
-            if ts_aware >= cutoff_time:
-                result.append(t)
-    return result
-
-# ============= Alerts Endpoints =============
-
-@app.get("/api/alerts")
-async def get_alerts(driver_id: Optional[str] = None, limit: int = 50):
-    """Get alerts with optional driver filter"""
-    filtered_alerts = alerts_data
-    if driver_id:
-        filtered_alerts = [a for a in filtered_alerts if a["driver_id"] == driver_id]
-    return sorted(filtered_alerts, key=lambda x: x["timestamp"], reverse=True)[:limit]
-
-@app.post("/api/alerts")
-async def create_alert(alert: AlertData):
-    """Create a new alert"""
-    alert_entry = {
-        "id": secrets.token_hex(8),
-        **to_json_safe(alert.model_dump()),  # FIX: convert datetimes
-        "created_at": utcnow().isoformat()
-    }
-    alerts_data.append(alert_entry)
-
-    # Broadcast alert to all connected clients
-    await broadcast_to_clients({
-        "type": "alert",
-        "data": alert_entry
-    })
-
-    return alert_entry
-
-# ============= Driver Endpoints =============
-
-@app.get("/api/drivers", response_model=List[DriverProfile])
-async def get_drivers():
-    """Get all drivers"""
-    return list(drivers_data.values())
-
-@app.post("/api/drivers", response_model=DriverProfile)
-async def create_driver(driver: DriverProfile):
-    """Create a new driver profile"""
-    drivers_data[driver.id] = driver.model_dump()
-    return driver
-
-@app.get("/api/drivers/{driver_id}", response_model=DriverProfile)
-async def get_driver(driver_id: str):
-    """Get specific driver details"""
-    driver = drivers_data.get(driver_id)
-    if not driver:
-        raise HTTPException(status_code=404, detail="Driver not found")
-    return driver
-
-# ============= Health Check =============
-
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": utcnow().isoformat(),
-        "telemetry_count": len(telemetry_data),
-        "alerts_count": len(alerts_data),
-        "active_connections": len(active_connections)
-    }
-
-# ============= WebSocket for Real-time Updates =============
-
-@app.websocket("/ws/monitoring")
-async def websocket_monitoring(websocket: WebSocket):
-    """WebSocket endpoint for real-time monitoring"""
-    await websocket.accept()
-    active_connections.append(websocket)
-
-    try:
-        # Send initial connection message
-        await websocket.send_json({
-            "type": "connection",
-            "message": "Connected to monitoring server",
-            "timestamp": utcnow().isoformat()
-        })
-
-        # Keep connection alive
-        while True:
-            data = await websocket.receive_text()
-
-            if data == "ping":
-                await websocket.send_json({
-                    "type": "pong",
-                    "timestamp": utcnow().isoformat()
-                })
-    except WebSocketDisconnect:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-
-async def broadcast_to_clients(message: Dict[str, Any]):
-    """Broadcast message to all connected WebSocket clients on /ws/monitoring"""
-    disconnected = []
-    payload = {
-        **to_json_safe(message),  # FIX: ensure no datetime objects sneak in
-        "timestamp": utcnow().isoformat()
-    }
-    for connection in active_connections:
-        try:
-            await connection.send_json(payload)
-        except Exception as e:
-            print(f"Error sending to client: {e}")
-            disconnected.append(connection)
-
-    for conn in disconnected:
-        if conn in active_connections:
-            active_connections.remove(conn)
-
-# ============= WebSocket Endpoint (/ws) =============
-
-# FIX: Separate connection pool for /ws clients (was sharing state with /ws/monitoring)
-ws_connections: Dict[str, Dict[str, Any]] = {}
-
-async def broadcast_message(message: Dict[str, Any]):
-    """
-    FIX: This function was called in /ws endpoint but was never defined — caused
-    NameError at runtime. Now properly broadcasts to all /ws clients.
-    """
-    payload = to_json_safe(message)
-    payload["timestamp"] = utcnow().isoformat()
-    disconnected = []
-    for client_id, conn_info in ws_connections.items():
-        try:
-            await conn_info["websocket"].send_json(payload)
-        except Exception as e:
-            print(f"Error broadcasting to ws client {client_id}: {e}")
-            disconnected.append(client_id)
-    for client_id in disconnected:
-        ws_connections.pop(client_id, None)
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time telemetry streaming"""
-    client_id = secrets.token_urlsafe(16)
-    driver_id = None
-
-    try:
-        await websocket.accept()
-        ws_connections[client_id] = {"websocket": websocket, "driver_id": None}
-        print(f"[ws] Client {client_id} connected")
-
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-
-            if message.get("type") == "authenticate":
-                driver_id = message.get("driver_id")
-                ws_connections[client_id]["driver_id"] = driver_id
-                print(f"[ws] Client {client_id} authenticated for driver {driver_id}")
-                await websocket.send_json({
-                    "type": "authenticated",
-                    "client_id": client_id,
-                    "driver_id": driver_id
-                })
-
-            elif message.get("type") == "subscribe":
-                await websocket.send_json({
-                    "type": "subscription_confirmed",
-                    "event_type": message.get("event_type")
-                })
-
-            elif message.get("type") == "telemetry":
-                # FIX: broadcast_message is now properly defined above
-                await broadcast_message({
-                    "type": "telemetry_update",
-                    "driver_id": driver_id,
-                    **message
-                })
-
-            elif message.get("type") == "ping":
-                await websocket.send_json({
-                    "type": "pong",
-                    "timestamp": utcnow().isoformat()
-                })
-
-    except WebSocketDisconnect:
-        print(f"[ws] Client {client_id} disconnected")
-    except Exception as e:
-        print(f"[ws] Error for client {client_id}: {e}")
-        try:
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        except Exception:
-            pass
-    finally:
-        ws_connections.pop(client_id, None)
-
-# ============= Root Endpoint =============
-
-@app.get("/")
-async def root():
-    """Root endpoint with API info"""
-    return {
-        "name": "VigilDrive API",
-        "version": "1.0.0",
-        "description": "AI-powered driver monitoring system",
-        "docs": "/docs",
-        "health": "/api/health"
-    }
+# ─────────────────────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    main()
