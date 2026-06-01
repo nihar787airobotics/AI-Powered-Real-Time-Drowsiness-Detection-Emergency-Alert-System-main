@@ -13,11 +13,17 @@ export default function Dashboard() {
   return (
     <MainLayout>
       <HeroTelemetry />
+
       <DriverMonitoringPanel />
+
       <AnalyticsCharts />
+
       <EventsAlertPanel />
+
       <SessionTable />
+
       <AISystemStatus />
+
       <ActivityFeed />
     </MainLayout>
   );
